@@ -67,6 +67,7 @@ jobs:
         run: |
           url="https://github.com/google/flatbuffers/releases/download/v${FLATC_VERSION}/Linux.flatc.binary.g++-13.zip"
           curl -fsSL "$url" -o flatc.zip
+          mkdir -p "$HOME/.local/bin"
           unzip -q flatc.zip -d "$HOME/.local/bin"
           chmod +x "$HOME/.local/bin/flatc"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
