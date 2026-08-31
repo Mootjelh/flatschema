@@ -50,6 +50,47 @@ func scalarTable(fields map[uint16]uint32) []byte {
 	return buf
 }
 
+// tableVector builds a buffer whose root holds a vector of tables at slot 4,
+// one element per value, each element a table with that uint32 at its own slot
+// 4. The elements share a vtable, which is what a real writer does with tables
+// of the same shape.
+func tableVector(values ...uint32) []byte {
+	n := len(values)
+	const evt = 4        // the vtable the element tables share
+	const elem0 = 12     // the first element table
+	vec := elem0 + 8*n   // the vector
+	rvt := vec + 4 + 4*n // the root vtable
+	r := rvt + 8         // the root table
+
+	buf := make([]byte, r+8)
+	le.PutUint32(buf[0:], uint32(r))
+
+	// 6 bytes of vtable, 8-byte tables, slot 4 four bytes into the table.
+	le.PutUint16(buf[evt:], 6)
+	le.PutUint16(buf[evt+2:], 8)
+	le.PutUint16(buf[evt+4:], 4)
+
+	for i, v := range values {
+		p := elem0 + 8*i
+		le.PutUint32(buf[p:], uint32(int32(p-evt)))
+		le.PutUint32(buf[p+4:], v)
+	}
+
+	le.PutUint32(buf[vec:], uint32(n))
+	for i := range values {
+		at := vec + 4 + 4*i
+		le.PutUint32(buf[at:], uint32(elem0+8*i-at))
+	}
+
+	le.PutUint16(buf[rvt:], 6)
+	le.PutUint16(buf[rvt+2:], 8)
+	le.PutUint16(buf[rvt+4:], 4)
+
+	le.PutUint32(buf[r:], uint32(int32(r-rvt)))
+	le.PutUint32(buf[r+4:], uint32(vec-(r+4)))
+	return buf
+}
+
 func infer(t *testing.T, buffers ...[]byte) *Schema {
 	t.Helper()
 	s, err := Infer(buffers...)
@@ -214,33 +255,93 @@ func TestSlotAndIdAgree(t *testing.T) {
 // Every type the schema mentions has to be declared in it, or flatc cannot
 // resolve the reference.
 func TestEveryReferencedTypeIsDeclared(t *testing.T) {
-	s := infer(t, scalarTable(map[uint16]uint32{4: 1, 6: 2}))
-	fbs := s.FBS()
-
-	declared := map[string]bool{}
-	for name := range tableFields(t, fbs) {
-		declared[name] = true
+	// Scalars alone never name a type, so the interesting cases are the nested
+	// ones: a vector of tables walked through, and the same vector with the
+	// walk stopped before its elements.
+	cases := map[string]*Schema{
+		"scalars": infer(t, scalarTable(map[uint16]uint32{4: 1, 6: 2})),
+		"walked":  inferDepth(t, 2, tableVector(11, 22)),
+		"cut":     inferDepth(t, 1, tableVector(11, 22)),
 	}
 
-	builtin := map[string]bool{
-		"uint": true, "[ubyte]": true, "string": true, "ubyte": true,
+	for name, s := range cases {
+		fbs := s.FBS()
+
+		declared := map[string]bool{}
+		for typ := range tableFields(t, fbs) {
+			declared[typ] = true
+		}
+
+		// One bracket at most. Stripping every bracket would turn [[ubyte]] into
+		// a builtin and wave through the nested vector that flatc rejects.
+		builtin := map[string]bool{"uint": true, "ubyte": true, "string": true}
+		for _, line := range strings.Split(fbs, "\n") {
+			m := fieldLine.FindStringSubmatch(line)
+			if m == nil {
+				continue
+			}
+			typ := m[2]
+			if inner, ok := strings.CutPrefix(typ, "["); ok {
+				typ = strings.TrimSuffix(inner, "]")
+			}
+			if builtin[typ] || declared[typ] {
+				continue
+			}
+			t.Errorf("%s: field %s has type %q, which is neither a builtin nor a table the schema declares\n---\n%s",
+				name, m[1], m[2], fbs)
+		}
+
+		if !strings.Contains(fbs, "root_type Root;") {
+			t.Errorf("%s: no root_type in the output\n---\n%s", name, fbs)
+		}
 	}
-	for _, line := range strings.Split(fbs, "\n") {
-		m := fieldLine.FindStringSubmatch(line)
-		if m == nil {
-			continue
-		}
-		typ := strings.Trim(m[2], "[]")
-		if builtin[typ] || builtin["["+typ+"]"] {
-			continue
-		}
-		if !declared[typ] {
-			t.Errorf("field %s refers to %q, which the schema never declares\n---\n%s", m[1], typ, fbs)
-		}
+}
+
+func inferDepth(t *testing.T, depth int, buffers ...[]byte) *Schema {
+	t.Helper()
+	s, err := InferWith(Options{MaxDepth: depth}, buffers...)
+	if err != nil {
+		t.Fatalf("InferWith: %v", err)
+	}
+	return s
+}
+
+// A vector of tables is written as [Name], and the name comes from the path
+// that reached the type. When the walk stops before that path, there is no type
+// to name, and writing [ubyte] there gives [[ubyte]]. FlatBuffers has no nested
+// vectors, so flatc rejects the whole file.
+//
+// The walk stops at the depth limit, on an element that will not read back as a
+// table, and where one table is reached twice. Only the first is easy to ask
+// for, so the depth limit stands in for all three.
+func TestAVectorOfTablesIsNeverRenderedAsANestedVector(t *testing.T) {
+	buf := tableVector(11, 22)
+
+	// The control. Deep enough to walk the elements, the field names a type and
+	// the type is declared. Without this the rest can pass because the fixture
+	// is not a vector of tables at all.
+	deep, err := InferWith(Options{MaxDepth: 2}, buf)
+	if err != nil {
+		t.Fatalf("InferWith: %v", err)
+	}
+	if got := deep.FBS(); !strings.Contains(got, "f4: [T4] (id: 0);") {
+		t.Fatalf("the fixture is not read as a vector of tables\n---\n%s", got)
 	}
 
-	if !strings.Contains(fbs, "root_type Root;") {
-		t.Errorf("no root_type in the output\n---\n%s", fbs)
+	cut, err := InferWith(Options{MaxDepth: 1}, buf)
+	if err != nil {
+		t.Fatalf("InferWith: %v", err)
+	}
+	fbs := cut.FBS()
+
+	if strings.Contains(fbs, "[[") {
+		t.Errorf("a nested vector reached the output, which flatc rejects\n---\n%s", fbs)
+	}
+	if !strings.Contains(fbs, "f4: [T4] (id: 0);") {
+		t.Errorf("the field does not name the element type\n---\n%s", fbs)
+	}
+	if _, ok := tableFields(t, fbs)["T4"]; !ok {
+		t.Errorf("T4 is referred to and never declared\n---\n%s", fbs)
 	}
 }
 

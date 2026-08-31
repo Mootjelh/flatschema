@@ -14,6 +14,7 @@ import (
 // the README.
 func (s *Schema) FBS() string {
 	var b strings.Builder
+	r := &render{schema: s, invented: map[string]bool{}}
 
 	fmt.Fprintf(&b, "// Inferred by flatschema from %d sample buffer(s).\n", s.Buffers)
 	b.WriteString("//\n")
@@ -27,19 +28,49 @@ func (s *Schema) FBS() string {
 		fmt.Fprintf(&b, "file_identifier %q;\n\n", s.Identifier)
 	}
 
+	// The tables first, then whatever they turned out to refer to. A reference
+	// to a type the walk never reached only comes up while rendering, so the
+	// placeholders cannot be written until the body is done.
+	var body strings.Builder
 	for _, t := range s.Types {
-		s.writeTable(&b, t)
+		r.writeTable(&body, t)
 	}
+	b.WriteString(body.String())
+	r.writePlaceholders(&b)
 
 	b.WriteString("root_type Root;\n")
 	return b.String()
+}
+
+// render is the state one call to [Schema.FBS] builds up: the type names it had
+// to invent because the walk never reached them, in the order they came up.
+type render struct {
+	schema       *Schema
+	placeholders []string
+	invented     map[string]bool
+}
+
+// writePlaceholders declares the types that are referred to above and were
+// never walked.
+//
+// Something has to be declared or the reference dangles. Writing [ubyte] in
+// place of the element name is worse than a dangling reference, because it
+// makes the field a vector of a vector, and FlatBuffers has no such thing, so
+// the file then does not compile at all. An empty table keeps the field the
+// shape the buffer says it is, and leaves the fields to a reader with a sample
+// that goes deeper.
+func (r *render) writePlaceholders(b *strings.Builder) {
+	for _, name := range r.placeholders {
+		b.WriteString("// Referred to above and never walked, so its fields are unknown.\n")
+		fmt.Fprintf(b, "table %s {\n}\n\n", name)
+	}
 }
 
 // declWidth is how wide a field declaration is padded before its comment, so
 // the comments line up in the common case and simply run long in the rest.
 const declWidth = 34
 
-func (s *Schema) writeTable(b *strings.Builder, t *Type) {
+func (r *render) writeTable(b *strings.Builder, t *Type) {
 	fmt.Fprintf(b, "// Seen %d time(s).\n", t.Tables)
 	fmt.Fprintf(b, "table %s {\n", t.Name())
 
@@ -69,7 +100,7 @@ func (s *Schema) writeTable(b *strings.Builder, t *Type) {
 		}
 
 		kind, agreed := field.Kind()
-		decl := fmt.Sprintf("f%d: %s (id: %d);", slot, s.fbsType(t, field, kind), id)
+		decl := fmt.Sprintf("f%d: %s (id: %d);", slot, r.fbsType(t, field, kind), id)
 
 		if note := comment(field, kind, agreed, t.Tables); note != "" {
 			fmt.Fprintf(b, "  %-*s%s\n", declWidth, decl, note)
@@ -86,33 +117,42 @@ func (s *Schema) writeTable(b *strings.Builder, t *Type) {
 // A scalar comes out as uint, which is a guess and is labelled as one in the
 // comment. Four bytes in a slot is equally a uint, an int, a float, or the
 // first four bytes of something the schema knew about and this does not.
-func (s *Schema) fbsType(t *Type, field *Field, kind flatread.Kind) string {
+func (r *render) fbsType(t *Type, field *Field, kind flatread.Kind) string {
 	switch kind {
 	case flatread.KindString:
 		return "string"
 	case flatread.KindBytes, flatread.KindRoaring:
 		return "[ubyte]"
 	case flatread.KindTable:
-		return s.nestedName(t, field.Slot)
+		return r.nestedName(t, field.Slot)
 	case flatread.KindVectorOfTables:
-		return "[" + s.nestedName(t, field.Slot) + "]"
+		return "[" + r.nestedName(t, field.Slot) + "]"
 	default:
 		return "uint"
 	}
 }
 
-// nestedName is the type reached through this slot. It falls back to a byte
-// vector when nothing was walked there, which happens when the depth limit cut
-// the walk short: naming a table that the file never declares would not compile.
-func (s *Schema) nestedName(t *Type, slot uint16) string {
+// nestedName is the type reached through this slot.
+//
+// The walk does not always get there. It stops at the depth limit, it stops on
+// an element that will not read back as a table, and it stops where one table
+// is reached twice by different routes. The name is the name either way, so it
+// is written and the type is declared empty at the end.
+func (r *render) nestedName(t *Type, slot uint16) string {
 	path := make([]uint16, len(t.Path)+1)
 	copy(path, t.Path)
 	path[len(t.Path)] = slot
 
-	if nested, ok := s.byPath[pathKey(path)]; ok {
+	if nested, ok := r.schema.byPath[pathKey(path)]; ok {
 		return nested.Name()
 	}
-	return "[ubyte]"
+
+	name := Type{Path: path}.Name()
+	if !r.invented[name] {
+		r.invented[name] = true
+		r.placeholders = append(r.placeholders, name)
+	}
+	return name
 }
 
 func comment(field *Field, kind flatread.Kind, agreed bool, tables int) string {
