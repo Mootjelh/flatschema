@@ -50,6 +50,29 @@ jobs:
       # a regression in that shows up in seconds, not hours.
       - run: go test -run=NONE -fuzz=FuzzReader -fuzztime=60s .
 
+  flatc:
+    name: flatc compiles the output
+    runs-on: ubuntu-latest
+    env:
+      # Without this the test skips when flatc is missing, and a skipped check
+      # is a green tick that means nothing.
+      FLATSCHEMA_REQUIRE_FLATC: '1'
+      FLATC_VERSION: '25.12.19'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: install flatc
+        run: |
+          url="https://github.com/google/flatbuffers/releases/download/v${FLATC_VERSION}/Linux.flatc.binary.g++-13.zip"
+          curl -fsSL "$url" -o flatc.zip
+          unzip -q flatc.zip -d "$HOME/.local/bin"
+          chmod +x "$HOME/.local/bin/flatc"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: flatc --version
+      - run: go test -run Flatc -v ./...
+
   lint:
     name: lint
     runs-on: ubuntu-latest
