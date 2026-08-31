@@ -9,9 +9,9 @@ import (
 
 // FBS renders the schema as a .fbs file.
 //
-// The grammar is followed and the two rules that would make every output
-// uncompilable are pinned by tests, but flatc has not been run against it. See
-// the README.
+// flatc compiles the result. TestFlatcCompilesTheGeneratedSchema runs it over
+// the shapes that have a branch here, and CI fails when flatc is missing rather
+// than skipping the check.
 func (s *Schema) FBS() string {
 	var b strings.Builder
 	r := &render{schema: s, invented: map[string]bool{}}

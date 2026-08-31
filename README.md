@@ -80,11 +80,23 @@ Keep the ids when you edit. They are what makes a later deletion fail at compile
 
 The output is a skeleton to edit, not a recovered original. What it saves you is the mechanical half.
 
-## Honest about what has been checked
+## What has been checked
 
-The generated syntax follows the `.fbs` grammar, and the two rules that would make every output uncompilable are pinned by tests: ids are contiguous from zero, and a field named for slot 12 carries id 4.
+`flatc` compiles the output, and CI keeps it that way. The `flatc` job builds sample buffers, renders the schema and compiles it with `flatc 25.12.19` on every push, over the shapes that have their own branch in the renderer: scalars, gaps between slots, samples that disagree, a vector of tables, a vector of tables the walk stopped before, a table with no fields, and all of them merged.
 
-**What has not happened is running `flatc` against the output**, because it is not installed on the machine this was written on and pulling a binary down to prove a claim was the wrong trade. So treat "flatc compiles this" as expected rather than verified. If you hit a schema it rejects, that is a bug worth an issue, and the buffer that produced it is the useful part.
+Two things about that job are deliberate. It sets `FLATSCHEMA_REQUIRE_FLATC`, because the test skips when `flatc` is missing and a skipped check is a green tick that means nothing. And it compiles a schema that `flatc` has to reject, since a check that passes everything would pass this too.
+
+Running `flatc` for the first time found a bug, which is the argument for having done it. A vector of tables was written as `[ubyte]` when the walk stopped before reaching its elements, and a vector of `[ubyte]` is `[[ubyte]]`. FlatBuffers has no nested vectors:
+
+```
+error: nested vector types not supported (wrap in table first)
+```
+
+The default depth limit is 12, so a buffer nested twelve deep with a vector of tables at the cut point was enough to produce a schema that would not compile, with no flags involved. Those types are declared as empty tables now ([#1](https://github.com/Mootjelh/flatschema/issues/1)).
+
+Beyond CI, the output was compiled for 198 combinations of real buffers and depth limits, including buffers `flatc` itself generated from a known schema so the inference could be checked against the file it came from.
+
+If you hit a schema `flatc` rejects, that is a bug worth an issue, and the buffer that produced it is the useful part.
 
 ## As a library
 
