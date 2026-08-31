@@ -1,0 +1,18 @@
+# Binaries. Anchored to the root: a pattern with no slash matches any path
+# component of that name at any depth, so a bare "flatschema" would also match
+# the cmd/flatschema directory and quietly keep the command out of the repo.
+bin/
+/flatschema
+/flatschema.exe
+*.exe
+*.test
+
+# Go
+testdata/fuzz/
+vendor/
+*.out
+
+# Sample buffers are somebody's payload and not ours to publish. Fixtures are
+# built in code instead.
+*.bin
+scratch/
